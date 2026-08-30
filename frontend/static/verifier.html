@@ -1,0 +1,63 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>TrueSync AI | Secure Live Verification</title>
+    <link rel="stylesheet" href="/static/css/style.css">
+    <link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@400;700;900&family=JetBrains+Mono:wght@400;700&display=swap" rel="stylesheet">
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1 class="title">TrueSync AI</h1>
+            <p class="subtitle">Secure Live Verification</p>
+        </header>
+
+        <div class="main-content">
+            <div class="video-container">
+                <video id="webcam" autoplay playsinline muted></video>
+                <div class="camera-overlay" id="camera-overlay">
+                    <span id="overlay-text">📷 Camera unavailable — allow access</span>
+                </div>
+            </div>
+
+            <div class="status-panel">
+                <div class="status-card" id="conn-status-card">
+                    <div class="status-title" id="conn-title">🔵 CONNECTING</div>
+                    <div class="status-detail" id="conn-detail">Opening WebSocket to backend...</div>
+                </div>
+
+                <div class="status-card">
+                    <div class="status-title">ENGINE INFO</div>
+                    <div class="info-row">Mode: <span class="highlight">PRODUCTION V1</span></div>
+                    <div class="info-row">Session: <span class="highlight" id="session-id">—</span></div>
+                </div>
+
+                <div class="status-card">
+                    <div class="status-title">MEDIA STATUS</div>
+                    <div class="info-row">Camera: <span id="cam-status">⏳ Requesting...</span></div>
+                    <div class="info-row">Microphone: <span id="mic-status">⏳ Requesting...</span></div>
+                </div>
+            </div>
+        </div>
+        
+        <div class="results-panel">
+            <div class="pill-row">
+                <div class="signal-pill" id="pill-rppg">❤️ <strong>Liveness</strong> &nbsp; <span class="pill-val">N/A</span></div>
+                <div class="signal-pill" id="pill-acoustic">🎙️ <strong>Voice Authenticity</strong> &nbsp; <span class="pill-val">N/A</span></div>
+                <div class="signal-pill" id="pill-sync">👄 <strong>Audio-Visual Sync</strong> &nbsp; <span class="pill-val">N/A</span></div>
+            </div>
+            
+            <div id="result-box" class="result-box hidden">
+                <!-- Result content injected via JS -->
+            </div>
+        </div>
+    </div>
+
+    <!-- Hidden canvas for video frame extraction -->
+    <canvas id="hidden-canvas" style="display:none;"></canvas>
+
+    <script src="/static/js/app.js"></script>
+</body>
+</html>

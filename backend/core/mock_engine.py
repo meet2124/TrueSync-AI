@@ -106,7 +106,7 @@ class MockEngine(AbstractBiometricEngine):
         """No-op in Phase 1.  Real rPPG processing goes here in Phase 2."""
         pass  # noqa: PIE790 — intentional mock no-op; signature must match interface
 
-    async def process_audio_chunk(self, samples: list[float]) -> None:
+    async def process_audio_chunk(self, samples: list[float], sample_rate: int = 16000) -> None:
         """No-op in Phase 1.  Real audio CNN processing goes here in Phase 2."""
         pass  # noqa: PIE790 — intentional mock no-op; signature must match interface
 

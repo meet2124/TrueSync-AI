@@ -68,8 +68,11 @@ class ProductionEngine(AbstractBiometricEngine):
 
     def _process_video_sync(self, frame_bytes: bytes, timestamp: float) -> None:
         try:
+            t0 = time.perf_counter()
             np_arr = np.frombuffer(frame_bytes, np.uint8)
             frame_bgr = cv2.imdecode(np_arr, cv2.IMREAD_COLOR)
+            t_decode = time.perf_counter()
+            
             if frame_bgr is None:
                 logger.warning("session=%s: Failed to decode JPEG frame", self._session_id)
                 return
@@ -79,22 +82,25 @@ class ProductionEngine(AbstractBiometricEngine):
                 aperture = self._rppg.get_mouth_aperture(frame_bgr)
                 if self._sync:
                     self._sync.update_video(timestamp, aperture)
+                    
+            t_total = time.perf_counter()
+            logger.info("Perf [session=%s]: video decode=%.2fms process=%.2fms total=%.2fms", 
+                         self._session_id, (t_decode - t0)*1000, (t_total - t_decode)*1000, (t_total - t0)*1000)
         except Exception as exc:
             logger.warning("session=%s: Video processing error: %s", self._session_id, exc)
 
-    async def process_audio_chunk(self, samples: list[float]) -> None:
+    async def process_audio_chunk(self, samples: list[float], sample_rate: int = 16000) -> None:
         if not self._running or not samples:
             return
             
         timestamp = time.time()
-        # Note: TrueSync typically uses 16kHz audio internally, hardcoding to match engine defaults
-        sample_rate = 16000 
         
         # Offload to thread to prevent blocking
         await asyncio.to_thread(self._process_audio_sync, samples, sample_rate, timestamp)
 
     def _process_audio_sync(self, samples: list[float], sample_rate: int, timestamp: float) -> None:
         try:
+            t0 = time.perf_counter()
             # Validate numeric bounds
             valid_samples = [s for s in samples if isinstance(s, (int, float)) and math.isfinite(s)]
             if not valid_samples:
@@ -103,10 +109,22 @@ class ProductionEngine(AbstractBiometricEngine):
             # Clamp to [-1.0, 1.0]
             valid_samples = [max(-1.0, min(1.0, float(s))) for s in valid_samples]
 
+            if sample_rate != 16000:
+                import scipy.signal
+                arr = np.array(valid_samples, dtype=np.float32)
+                # resample to 16kHz
+                new_len = int(len(arr) * 16000 / sample_rate)
+                resampled = scipy.signal.resample(arr, new_len)
+                valid_samples = resampled.tolist()
+                sample_rate = 16000
+
             if self._acoustic:
                 self._acoustic.update(valid_samples, sample_rate, timestamp)
             if self._sync:
                 self._sync.update_audio(valid_samples, sample_rate, timestamp)
+                
+            t_total = time.perf_counter()
+            logger.info("Perf [session=%s]: audio process=%.2fms", self._session_id, (t_total - t0)*1000)
         except Exception as exc:
             logger.warning("session=%s: Audio processing error: %s", self._session_id, exc)
 
@@ -133,6 +151,7 @@ class ProductionEngine(AbstractBiometricEngine):
         return await asyncio.to_thread(self._get_metrics_sync)
 
     def _get_metrics_sync(self) -> BiometricFrame:
+        t0 = time.perf_counter()
         try:
             rppg_data = self._rppg.get_score() if self._rppg else {}
         except Exception as exc:
@@ -191,6 +210,9 @@ class ProductionEngine(AbstractBiometricEngine):
         # Sanitise waveform
         raw_waveform = rppg_data.get("rppg_waveform", []) or []
         waveform = [float(v) for v in raw_waveform if isinstance(v, (int, float)) and math.isfinite(v)]
+
+        t_total = time.perf_counter()
+        logger.info("Perf [session=%s]: metric generation=%.2fms", self._session_id, (t_total - t0)*1000)
 
         return BiometricFrame(
             timestamp=time.time(),

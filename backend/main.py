@@ -32,6 +32,9 @@ from typing import Any
 from dotenv import load_dotenv
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
+from fastapi.responses import FileResponse
+from pathlib import Path
 
 from backend.core.engine_interface import AbstractBiometricEngine
 from backend.core.mock_engine import MockEngine
@@ -60,13 +63,23 @@ app = FastAPI(
     version="1.0.0-phase1",
 )
 
+CORS_ORIGINS = os.getenv("CORS_ORIGINS", "*").split(",")
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],          # tighten in production
+    allow_origins=CORS_ORIGINS,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+frontend_dir = Path(__file__).parent.parent / "frontend" / "static"
+frontend_dir.mkdir(parents=True, exist_ok=True)
+app.mount("/static", StaticFiles(directory=str(frontend_dir)), name="static")
+
+@app.get("/verify")
+async def verify_page():
+    return FileResponse(frontend_dir / "verifier.html")
 
 
 # ── Engine factory — the ONLY place that knows about concrete engine types ─────
@@ -130,8 +143,12 @@ async def websocket_session(websocket: WebSocket) -> None:
                 pass  # No message arrived in the poll window — that's fine.
 
             # ── Emit latest metrics ───────────────────────────────────────────
+            t_start_metric = time.perf_counter()
             frame = await engine.get_latest_metrics()
+            t_latency = time.perf_counter() - t_start_metric
             await websocket.send_json(frame.model_dump())
+            
+            logger.info("Perf [session=%s]: metric fetch and emit latency=%.2fms", frame.session_id, t_latency * 1000)
             logger.debug("Frame emitted — session=%s bpm=%.1f trust=%.2f",
                          frame.session_id, frame.bpm or 0, frame.overall_trust or 0)
 
@@ -176,7 +193,8 @@ async def _handle_inbound(
     elif msg_type == "audio_chunk":
         try:
             samples: list[float] = list(msg.get("data", []))
-            await engine.process_audio_chunk(samples)
+            sample_rate: int = int(msg.get("sample_rate", 16000))
+            await engine.process_audio_chunk(samples, sample_rate=sample_rate)
         except (TypeError, ValueError) as exc:
             logger.warning("Bad audio_chunk message from client_id=%s: %s", client_id, exc)
 

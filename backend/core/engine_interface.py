@@ -46,7 +46,7 @@ class AbstractBiometricEngine(ABC):
         """
 
     @abstractmethod
-    async def process_audio_chunk(self, samples: list[float]) -> None:
+    async def process_audio_chunk(self, samples: list[float], sample_rate: int = 16000) -> None:
         """
         Accept a chunk of normalised audio samples (PCM, –1.0–1.0) captured
         from the client microphone and update internal state.  Phase 1 mock
