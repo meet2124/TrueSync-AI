@@ -94,6 +94,19 @@ html, body, [class*="css"] {
 .ts-offline { background:#1a0800; border:1px solid #ff6600; border-radius:8px;
                padding:0.5rem 1rem; color:#ff9955; font-size:0.73rem;
                letter-spacing:0.07em; text-align:center; margin-bottom:0.7rem; }
+.ts-result-pass { background:#00ff8810; border:1px solid #00ff8844; border-radius:12px;
+                   padding:1.2rem 1.5rem; margin-bottom:1rem; }
+.ts-result-fail { background:#ff4a4a10; border:1px solid #ff4a4a44; border-radius:12px;
+                   padding:1.2rem 1.5rem; margin-bottom:1rem;
+                   animation: blink 1.5s step-start infinite; }
+.ts-result-title { font-family:'Orbitron',sans-serif; font-size:1.3rem; font-weight:900; margin-bottom:0.5rem; }
+.ts-signal-row { display:flex; gap:0.8rem; flex-wrap:wrap; margin:0.6rem 0; }
+.ts-signal-pill { display:inline-flex; align-items:center; gap:0.4rem;
+                   background:#0d1520; border:1px solid #00f0ff22; border-radius:8px;
+                   padding:0.5rem 0.9rem; font-size:0.78rem; }
+.ts-signal-pass { border-color:#00ff8844; color:#00ff88; }
+.ts-signal-fail { border-color:#ff4a4a44; color:#ff4a4a; }
+.ts-signal-na   { border-color:#3a4a5a44; color:#5a7a8a; }
 section[data-testid="stSidebar"] {
     background-color: #060a10 !important;
     border-right: 1px solid #00f0ff18;
@@ -222,7 +235,14 @@ def _trust_gauge(trust: float) -> go.Figure:
     return fig
 
 
-def _mini_bar(label: str, value: float, color: str = _CYAN) -> str:
+def _mini_bar(label: str, value: Optional[float], color: str = _CYAN) -> str:
+    if value is None:
+        return f"""
+<div class="ts-card">
+  <div class="ts-card-label">{label}</div>
+  <div class="ts-bar-wrap"><div class="ts-bar-fill" style="width:2%;background:#2a3a4a;"></div></div>
+  <div class="ts-card-value" style="font-size:1.05rem;color:#3a5a6a;">N/A</div>
+</div>"""
     pct = int(value * 100)
     return f"""
 <div class="ts-card">
@@ -332,84 +352,166 @@ if not st.session_state["ws_connected"]:
 
 # ── Layout ────────────────────────────────────────────────────────────────────
 result: Optional[dict[str, Any]] = st.session_state["latest_result"]
-overall = float(result.get("overall_trust") or 0.0) if result else 0.0
-bpm_val = float(result.get("bpm") or 0.0) if result else 0.0
+overall = result.get("overall_trust") if result else None
+bpm_val = result.get("bpm") if result else None
 flag = (result.get("status") or "calibrating") if result else "calibrating"
-rppg_conf = float(result.get("rppg_confidence") or 0.0) if result else 0.0
-acoustic = float(result.get("acoustic_trust") or 0.0) if result else 0.0
-sync_sc = float(result.get("sync_score") or 0.0) if result else 0.0
+rppg_conf: Optional[float] = result.get("rppg_confidence") if result else None
+acoustic: Optional[float] = result.get("acoustic_trust") if result else None
+sync_sc: Optional[float] = result.get("sync_score") if result else None
 sync_lag = result.get("sync_lag_ms") if result else None
 active_rois = result.get("active_rois", []) if result else []
 ts_val = result.get("timestamp", time.time()) if result else time.time()
+latency_ms = result.get("processing_latency_ms") if result else None
+overall_disp = float(overall) if overall is not None else 0.0
 
 left_col, right_col = st.columns([3, 2], gap="medium")
 
 with left_col:
-    st.markdown('<p class="ts-section">📊 LIVE METRICS</p>', unsafe_allow_html=True)
-    st.markdown(f"""
-<div class="ts-card-row">
-  <div class="ts-card">
-    <div class="ts-card-label">❤ Heart Rate</div>
-    <div class="ts-card-value">{bpm_val:.1f}<span class="ts-card-unit">BPM</span></div>
-  </div>
-  <div class="ts-card">
-    <div class="ts-card-label">🛡 Overall Trust</div>
-    <div class="ts-card-value">{overall:.1f}<span class="ts-card-unit">/ 100</span></div>
-  </div>
-  <div class="ts-card">
-    <div class="ts-card-label">🚦 Status</div>
-    <div style="margin-top:0.4rem;">{_badge(flag)}</div>
-  </div>
-  <div class="ts-card">
-    <div class="ts-card-label">🕐 Timestamp</div>
-    <div class="ts-card-value" style="font-size:0.82rem;color:#4a8aaa;">
-      {time.strftime('%H:%M:%S', time.localtime(ts_val))}
-    </div>
-  </div>
-</div>""", unsafe_allow_html=True)
+    # ── Connection / calibration state banner ────────────────────────────
+    if not st.session_state["ws_connected"]:
+        pass  # banner already shown above
+    elif flag == "calibrating":
+        st.info("⏳ **Calibrating** — Hold still and speak naturally. Collecting signal data…")
+    elif flag == "insufficient_data":
+        st.warning("📡 **Insufficient Signal** — No biometric data yet. Check camera and microphone.")
 
-    st.markdown('<p class="ts-section">🔬 SUB-SCORES</p>', unsafe_allow_html=True)
+    # ── Simple verification signals (primary user view) ──────────────────
+    st.markdown('<p class="ts-section">✅ VERIFICATION SIGNALS</p>', unsafe_allow_html=True)
+
+    def _signal_pill(emoji: str, label: str, score: Optional[float]) -> str:
+        if score is None:
+            cls = "ts-signal-na"
+            mark = "⟳"
+            pct_txt = "Calibrating…"
+        elif score >= 0.70:
+            cls = "ts-signal-pass"
+            mark = "✓"
+            pct_txt = f"{int(score*100)}%"
+        else:
+            cls = "ts-signal-fail"
+            mark = "✗"
+            pct_txt = f"{int(score*100)}%"
+        return (f'<div class="ts-signal-pill {cls}">'
+                f'{emoji} <strong>{label}</strong> &nbsp; {mark} {pct_txt}</div>')
+
     st.markdown(
-        '<div class="ts-card-row">'
-        + _mini_bar("rPPG Liveness", rppg_conf, _CYAN)
-        + _mini_bar("Acoustic Trust", acoustic, "#a259ff")
-        + _mini_bar("Viseme Sync", sync_sc, "#ff2fd0")
+        '<div class="ts-signal-row">'
+        + _signal_pill("❤️", "Liveness", rppg_conf)
+        + _signal_pill("🎙️", "Voice Authenticity", acoustic)
+        + _signal_pill("👄", "Audio-Visual Sync", sync_sc)
         + "</div>",
         unsafe_allow_html=True,
     )
-    if sync_lag is not None:
-        lag_color = "#00ff88" if abs(sync_lag) <= 80 else "#ffcc00"
+
+    # ── Result screen ─────────────────────────────────────────────────────
+    if flag == "nominal" and overall is not None:
+        reason_parts = []
+        if rppg_conf is not None and rppg_conf >= 0.70:
+            reason_parts.append("a live heartbeat signal was detected")
+        if acoustic is not None and acoustic >= 0.70:
+            reason_parts.append("voice characteristics are consistent with a real person")
+        if sync_sc is not None and sync_sc >= 0.70:
+            reason_parts.append("lip movement matches the audio")
+        reason = "; ".join(reason_parts) if reason_parts else "all available signals passed"
         st.markdown(
-            f'<div style="font-size:0.65rem;color:{lag_color};margin-bottom:0.6rem;">'
-            f'Sync lag: {sync_lag:+.0f} ms (negative = audio leads)</div>',
+            f'<div class="ts-result-pass">'
+            f'<div class="ts-result-title" style="color:#00ff88;">🟢 HUMAN / CONSISTENT SIGNALS</div>'
+            f'<div style="font-size:1.6rem;font-weight:700;color:#00ff88;margin:0.4rem 0;">{overall_disp:.1f}<span style="font-size:0.9rem;color:#4a8a6a;"> / 100</span></div>'
+            f'<div style="font-size:0.75rem;color:#5aaa7a;">Why this result? Because {reason}.</div>'
+            f"</div>",
+            unsafe_allow_html=True,
+        )
+    elif flag in ("low_confidence", "insufficient_data") and overall is not None and overall_disp < 50:
+        st.markdown(
+            f'<div class="ts-result-fail">'
+            f'<div class="ts-result-title" style="color:#ff4a4a;">🔴 SUSPICIOUS ACTIVITY</div>'
+            f'<div style="font-size:1.6rem;font-weight:700;color:#ff4a4a;margin:0.4rem 0;">{overall_disp:.1f}<span style="font-size:0.9rem;color:#8a4a4a;"> / 100</span></div>'
+            f'<div style="font-size:0.75rem;color:#aa5a5a;">Signals were inconsistent with expected live human behaviour. '
+            f'This does not confirm a deepfake — environmental factors (lighting, noise) may also cause this.</div>'
+            f"</div>",
             unsafe_allow_html=True,
         )
 
-    st.markdown('<p class="ts-section">〰 rPPG PULSE WAVEFORM</p>', unsafe_allow_html=True)
-    st.plotly_chart(
-        _waveform_chart(list(st.session_state["waveform"])),
-        use_container_width=True,
-        config={"displayModeBar": False},
-    )
+    # ── Technical analysis expander ───────────────────────────────────────
+    with st.expander("🔬 View Technical Analysis", expanded=False):
+        bpm_txt = f"{float(bpm_val):.1f} BPM" if bpm_val is not None else "N/A"
+        overall_txt = f"{overall_disp:.1f} / 100" if overall is not None else "N/A"
+        rppg_txt = f"{int(rppg_conf*100)}%" if rppg_conf is not None else "N/A"
+        acoustic_txt = f"{int(acoustic*100)}%" if acoustic is not None else "N/A"
+        sync_txt = f"{int(sync_sc*100)}%" if sync_sc is not None else "N/A"
+        lag_txt = f"{sync_lag:+.0f} ms" if sync_lag is not None else "N/A"
+        latency_txt = f"{latency_ms:.1f} ms" if latency_ms is not None else "N/A"
+        roi_txt = ", ".join(active_rois) if active_rois else "None"
 
-    if active_rois:
-        roi_html = " &nbsp; ".join(
-            f'<span style="background:#0d1f2d;border:1px solid #00f0ff28;border-radius:4px;'
-            f'padding:0.12rem 0.45rem;font-size:0.63rem;color:#00f0ff88;">{r}</span>'
-            for r in active_rois
+        st.markdown('<p class="ts-section">📊 RAW METRICS</p>', unsafe_allow_html=True)
+        st.markdown(
+            f'<div class="ts-card-row">'
+            f'<div class="ts-card"><div class="ts-card-label">❤ Heart Rate</div>'
+            f'<div class="ts-card-value" style="font-size:1.2rem;">{bpm_txt}</div></div>'
+            f'<div class="ts-card"><div class="ts-card-label">🛡 Overall Trust</div>'
+            f'<div class="ts-card-value" style="font-size:1.2rem;">{overall_txt}</div></div>'
+            f'<div class="ts-card"><div class="ts-card-label">⏱ Processing</div>'
+            f'<div class="ts-card-value" style="font-size:1.2rem;color:#5a9abf;">{latency_txt}</div></div>'
+            f'</div>',
+            unsafe_allow_html=True,
         )
         st.markdown(
-            f'<p class="ts-section">🎯 ACTIVE ROIs</p>'
-            f'<div style="margin-bottom:0.6rem;">{roi_html}</div>',
+            f'<div class="ts-card-row">'
+            + _mini_bar("rPPG Liveness", rppg_conf, _CYAN)
+            + _mini_bar("Acoustic Trust", acoustic, "#a259ff")
+            + _mini_bar("Viseme Sync", sync_sc, "#ff2fd0")
+            + "</div>",
             unsafe_allow_html=True,
+        )
+        if sync_lag is not None:
+            lag_color = "#00ff88" if abs(sync_lag) <= 80 else "#ffcc00"
+            st.markdown(
+                f'<div style="font-size:0.65rem;color:{lag_color};margin-bottom:0.6rem;">'
+                f'Sync lag: {sync_lag:+.0f} ms (negative = audio leads)</div>',
+                unsafe_allow_html=True,
+            )
+        st.markdown(f'<p class="ts-section">🎯 ACTIVE ROIs</p><div style="font-size:0.7rem;color:#4a8aaa;margin-bottom:0.5rem;">{roi_txt}</div>', unsafe_allow_html=True)
+
+        st.markdown('<p class="ts-section">〰 rPPG PULSE WAVEFORM</p>', unsafe_allow_html=True)
+        st.plotly_chart(
+            _waveform_chart(list(st.session_state["waveform"])),
+            use_container_width=True,
+            config={"displayModeBar": False},
         )
 
 with right_col:
     st.markdown('<p class="ts-section">⚡ TRUST GAUGE</p>', unsafe_allow_html=True)
     st.plotly_chart(
-        _trust_gauge(overall),
+        _trust_gauge(overall_disp),
         use_container_width=True,
         config={"displayModeBar": False},
+    )
+
+    # Connection state card
+    if not st.session_state["ws_connected"]:
+        conn_color = "#ff6600"
+        conn_label = "🔴 DISCONNECTED"
+        conn_detail = st.session_state.get("ws_error") or "Connecting…"
+    elif flag == "calibrating":
+        conn_color = "#ffcc00"
+        conn_label = "🟡 CALIBRATING"
+        conn_detail = "Collecting biometric data…"
+    elif flag == "nominal":
+        conn_color = "#00ff88"
+        conn_label = "🟢 ANALYZING"
+        conn_detail = "Live biometric stream active"
+    else:
+        conn_color = "#ff9900"
+        conn_label = "🟠 LOW CONFIDENCE"
+        conn_detail = "Signals insufficient — check lighting & mic"
+
+    st.markdown(
+        f'<div style="background:#0d1520;border:1px solid {conn_color}33;border-radius:8px;'
+        f'padding:0.75rem 1rem;margin-bottom:0.5rem;font-size:0.7rem;">'
+        f'<div style="color:{conn_color};font-weight:700;margin-bottom:0.2rem;">{conn_label}</div>'
+        f'<div style="color:#5a7a8a;">{conn_detail}</div>'
+        f'</div>',
+        unsafe_allow_html=True,
     )
 
     st.markdown('<p class="ts-section">📷 LIVE PREVIEW</p>', unsafe_allow_html=True)
@@ -420,7 +522,8 @@ with right_col:
         st.markdown(
             '<div style="background:#0d1520;border:1px dashed #1a2e40;border-radius:8px;'
             'height:200px;display:flex;align-items:center;justify-content:center;'
-            'color:#253040;font-size:0.72rem;letter-spacing:0.1em;">CAMERA UNAVAILABLE</div>',
+            'color:#253040;font-size:0.72rem;letter-spacing:0.1em;">'
+            '📷 Camera unavailable — allow access or check index</div>',
             unsafe_allow_html=True,
         )
 
@@ -431,8 +534,9 @@ with right_col:
         f'<div style="color:#4a6a80;letter-spacing:0.1em;text-transform:uppercase;'
         f'margin-bottom:0.35rem;">ENGINE INFO</div>'
         f'<div>Mode: <span style="color:#00f0ff;">PRODUCTION V1</span></div>'
-        f'<div style="margin-top:0.25rem;">Session: '
-        f'<span style="color:#4a8aaa;">{session_id}…</span></div>'
+        f'<div style="margin-top:0.2rem;">Session: <span style="color:#4a8aaa;">{session_id}…</span></div>'
+        f'<div style="margin-top:0.2rem;">Time: <span style="color:#4a8aaa;">'
+        f'{time.strftime("%H:%M:%S", time.localtime(ts_val))}</span></div>'
         f'</div>',
         unsafe_allow_html=True,
     )

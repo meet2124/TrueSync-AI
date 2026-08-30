@@ -10,10 +10,18 @@ If a sub-score is None (module still calibrating), it is excluded and remaining
 weights are re-normalised. Status reflects calibration state.
 
 overall_trust = 100 × Σ(w_i × score_i) / Σ(w_i)   for available scores only
+
+Signal state distinction
+------------------------
+AVAILABLE     : score is a float in [0, 1] — module has sufficient data.
+LOW_CONFIDENCE: overall_trust < THRESHOLD_LOW_CONFIDENCE — signal present but weak.
+UNAVAILABLE   : score is None — module has not yet accumulated minimum buffer,
+                or encountered an unrecoverable error. Never treated as 0 or 0.5.
 """
 from __future__ import annotations
 
 import logging
+import math
 from typing import Dict, Optional
 
 logger = logging.getLogger("truesync.fusion")
@@ -26,6 +34,19 @@ W_SYNC: float = 0.25      # Viseme-phoneme sync (deepfake indicator)
 # ── Decision thresholds (for status classification) ───────────────────────────
 THRESHOLD_LOW_CONFIDENCE: float = 50.0    # below this → "low_confidence"
 THRESHOLD_NOMINAL: float = 75.0           # above this → "nominal"
+
+
+def _clamp_score(score: Optional[float]) -> Optional[float]:
+    """
+    Clamp a sub-score to [0, 1] and reject NaN/Inf.
+    Returns None if the value is not a valid finite number.
+    """
+    if score is None:
+        return None
+    if not math.isfinite(score):
+        logger.warning("fusion: received non-finite sub-score (%.6g) — treated as unavailable", score)
+        return None
+    return max(0.0, min(1.0, score))
 
 
 def fuse(
@@ -47,9 +68,9 @@ def fuse(
     dict with keys: overall_trust (float | None), status (str)
     """
     candidates = [
-        (rppg_confidence, W_RPPG, "rppg"),
-        (acoustic_trust, W_ACOUSTIC, "acoustic"),
-        (sync_score, W_SYNC, "sync"),
+        (_clamp_score(rppg_confidence), W_RPPG, "rppg"),
+        (_clamp_score(acoustic_trust), W_ACOUSTIC, "acoustic"),
+        (_clamp_score(sync_score), W_SYNC, "sync"),
     ]
 
     available = [(score, w, name) for score, w, name in candidates if score is not None]
@@ -64,7 +85,8 @@ def fuse(
     total_weight = sum(w for _, w, _ in available)
     weighted_sum = sum(score * w for score, w, _ in available)
     overall_01 = weighted_sum / total_weight  # 0–1
-    overall_100 = round(overall_01 * 100.0, 2)
+    # Final clamp: guard against any floating-point edge cases
+    overall_100 = round(max(0.0, min(100.0, overall_01 * 100.0)), 2)
 
     # Status classification
     n_available = len(available)

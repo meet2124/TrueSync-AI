@@ -259,6 +259,16 @@ class RPPGModule:
         # Detrend (remove DC offset)
         fused -= np.mean(fused)
 
+        # ── Flat-signal guard ─────────────────────────────────────────────────
+        # A static image or replay has essentially zero variance in the green channel.
+        signal_std = float(np.std(fused))
+        if signal_std < 0.05:
+            logger.debug("rPPG: flat signal detected (std=%.4f) — insufficient biological signal", signal_std)
+            self._bpm = None
+            self._confidence = None
+            self._filtered_signal = []
+            return
+
         # Butterworth bandpass, zero-phase
         try:
             filtered = filtfilt(self._b, self._a, fused)
@@ -266,6 +276,14 @@ class RPPGModule:
             logger.warning("rPPG filtfilt failed: %s", exc)
             self._bpm = None
             self._confidence = None
+            return
+
+        # ── NaN/Inf guard after filtering ────────────────────────────────────
+        if not np.isfinite(filtered).all():
+            logger.warning("rPPG: NaN/Inf detected in filtered signal — resetting")
+            self._bpm = None
+            self._confidence = None
+            self._filtered_signal = []
             return
 
         # Welch PSD
@@ -283,7 +301,7 @@ class RPPGModule:
         band_psd = psd[band_mask]
         total_power = float(band_psd.sum())
 
-        if total_power <= 0:
+        if total_power <= 0 or not np.isfinite(total_power):
             self._bpm = None
             self._confidence = None
             return
@@ -292,10 +310,15 @@ class RPPGModule:
         peak_freq = float(band_freqs[peak_idx])
         peak_power = float(band_psd[peak_idx])
 
+        # ── Confidence degradation for weak signal ────────────────────────────
+        # Fewer active ROIs → lower weight on the confidence score.
+        n_rois = max(1, len(self._valid_rois))
+        roi_factor = n_rois / len(_ROI_DEFS)   # 1.0 when all 3 ROIs active
+
         self._bpm = round(peak_freq * 60.0, 1)
-        # Confidence = ratio of power at peak vs total in-band power
-        # A flat spectrum (photo/replay) → confidence ≈ 1/N_bins ≈ low
-        self._confidence = round(float(peak_power / total_power), 4)
+        # Confidence = ratio of peak power vs total in-band power, scaled by ROI coverage
+        raw_conf = float(peak_power / total_power) * roi_factor
+        self._confidence = round(min(1.0, max(0.0, raw_conf)), 4)
         self._filtered_signal = filtered[-90:].tolist()
 
         logger.debug("rPPG recompute: bpm=%.1f conf=%.3f ms=%.1f",
@@ -416,9 +439,19 @@ class AcousticModule:
         if len(arr) < self._sample_rate * _ACOUSTIC_MIN_DURATION_S:
             return
 
+        # ── Silence guard ─────────────────────────────────────────────────────
+        # Near-silent audio provides no useful acoustic information.
+        rms = float(np.sqrt(np.mean(arr ** 2)))
+        if rms < 1e-5:
+            logger.debug("Acoustic: near-silence detected (rms=%.2e) — skipping recompute", rms)
+            return
+
         # ── 1. Spectral flatness via magnitude STFT ───────────────────────────
-        n_fft = 1024
-        hop = 256
+        n_fft = min(1024, len(arr))
+        if n_fft < 32:
+            logger.debug("Acoustic: audio too short for STFT (n=%d)", len(arr))
+            return
+        hop = min(256, n_fft // 4)
         stft_complex = librosa.stft(arr, n_fft=n_fft, hop_length=hop)
         magnitude = np.abs(stft_complex)
 
@@ -429,6 +462,11 @@ class AcousticModule:
         arithmetic_mean = np.mean(magnitude, axis=0) + eps
         sf_per_frame = geometric_mean / arithmetic_mean
         sf = float(np.mean(sf_per_frame))
+
+        # ── NaN/Inf guard ─────────────────────────────────────────────────────
+        if not np.isfinite(sf):
+            logger.warning("Acoustic: NaN/Inf in spectral flatness — skipping")
+            return
         sf = max(0.0, min(1.0, sf))
         acoustic_sf_score = 1.0 - sf
 
@@ -436,19 +474,31 @@ class AcousticModule:
         phase = np.angle(stft_complex)
         # Phase derivative across time (instantaneous frequency)
         phase_diff = np.diff(phase, axis=1)
+        if phase_diff.shape[1] == 0:
+            logger.debug("Acoustic: insufficient STFT frames for phase consistency")
+            return
         # Unwrap to get continuous IF trajectory
         phase_diff_unwrapped = np.unwrap(phase_diff, axis=1)
         # Variance of IF deviation across frequency bins, averaged over time
         if_variance = float(np.mean(np.var(phase_diff_unwrapped, axis=0)))
+
+        # ── NaN/Inf guard ─────────────────────────────────────────────────────
+        if not np.isfinite(if_variance):
+            logger.warning("Acoustic: NaN/Inf in phase consistency variance — skipping")
+            return
+
         acoustic_pc_score = float(np.tanh(if_variance * self._PC_SCALE))
         acoustic_pc_score = max(0.0, min(1.0, acoustic_pc_score))
 
         # ── Fusion ────────────────────────────────────────────────────────────
-        self._acoustic_trust = round(
+        fused = (
             self.W_SPECTRAL_FLATNESS * acoustic_sf_score +
-            self.W_PHASE_CONSISTENCY * acoustic_pc_score,
-            4
+            self.W_PHASE_CONSISTENCY * acoustic_pc_score
         )
+        if not np.isfinite(fused):
+            logger.warning("Acoustic: NaN/Inf in fused score — resetting")
+            return
+        self._acoustic_trust = round(max(0.0, min(1.0, fused)), 4)
 
         logger.debug(
             "Acoustic recompute: sf=%.4f sf_score=%.4f pc_var=%.6f pc_score=%.4f trust=%.4f ms=%.1f",
@@ -540,25 +590,42 @@ class SyncModule:
 
         # Z-normalise both signals
         def _znorm(x: np.ndarray) -> np.ndarray:
-            std = np.std(x)
+            if len(x) == 0:
+                return x
+            std = float(np.std(x))
             if std < 1e-10:
-                return x - np.mean(x)
-            return (x - np.mean(x)) / std
+                return x - float(np.mean(x))
+            return (x - float(np.mean(x))) / std
 
         v_norm = _znorm(v_vals_crop)
         a_norm = _znorm(a_interp)
+
+        # ── NaN/Inf guard after normalisation ────────────────────────────────
+        if not (np.isfinite(v_norm).all() and np.isfinite(a_norm).all()):
+            logger.warning("Sync: NaN/Inf in normalised signals — skipping recompute")
+            return
 
         # Cross-correlation
         n = len(v_norm)
         max_lag_samples = int(self._video_fps * _SYNC_LAG_WINDOW_S)
         max_lag_samples = min(max_lag_samples, n - 1)
 
-        correlation = np.correlate(v_norm, a_norm, mode="full")
+        try:
+            correlation = np.correlate(v_norm, a_norm, mode="full")
+        except Exception as exc:
+            logger.warning("Sync: cross-correlation failed: %s", exc)
+            return
+
         center = n - 1
         lag_range = np.arange(-max_lag_samples, max_lag_samples + 1)
         corr_window = correlation[center + lag_range[0]: center + lag_range[-1] + 1]
 
         if len(corr_window) == 0:
+            return
+
+        # ── NaN/Inf guard on correlation output ──────────────────────────────
+        if not np.isfinite(corr_window).all():
+            logger.warning("Sync: NaN/Inf in correlation window — skipping")
             return
 
         peak_idx = int(np.argmax(np.abs(corr_window)))

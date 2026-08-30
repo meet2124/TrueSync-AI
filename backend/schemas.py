@@ -50,3 +50,8 @@ class BiometricResult(BaseModel):
 
     # Status
     status: Literal["nominal", "calibrating", "insufficient_data", "low_confidence"] = "calibrating"
+
+    # Performance instrumentation — actual measured value, never hardcoded
+    processing_latency_ms: Optional[float] = Field(
+        None, ge=0.0, description="Total backend processing time for this frame in milliseconds."
+    )
