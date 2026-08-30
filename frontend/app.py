@@ -127,7 +127,6 @@ def _init() -> None:
         "send_q": queue.Queue(maxsize=10),
         "recv_q": queue.Queue(maxsize=10),
         "ws_thread": None,    # holds the Thread object for is_alive() check
-        "cap": None,          # persistent VideoCapture — opened once, not per rerun
         "cam_frame": None,
     }
     for k, v in defaults.items():
@@ -217,25 +216,30 @@ def _ws_thread(ws_url: str, send_q: queue.Queue, recv_q: queue.Queue) -> None:
 
 
 # ── Camera capture helper ─────────────────────────────────────────────────────
+@st.cache_resource
+def _create_cap(cam_src: str) -> cv2.VideoCapture:
+    """
+    Note: Caching hardware handles globally means a single physical webcam
+    is shared across the server. This is appropriate for a local/hackathon 
+    deployment, but not for a multi-user cloud deployment.
+    """
+    cam_idx: Any = int(cam_src) if cam_src.strip().isdigit() else cam_src
+    cap = cv2.VideoCapture(cam_idx)
+    if cap.isOpened():
+        cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
+        cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+    return cap
+
+
 def _get_cap(cam_src: str) -> Optional[cv2.VideoCapture]:
     """
-    Return the cached VideoCapture, creating it only if it does not exist or
-    the source has changed. Never opens a new device on every Streamlit rerun.
+    Return the cached VideoCapture. Never opens a new device on every 
+    Streamlit rerun. Survives session resets to avoid hardware locks.
     """
-    cam_key = f"_cap_src_{cam_src}"  # unique key per source
-    cap: Optional[cv2.VideoCapture] = st.session_state.get(cam_key)
-    if cap is None or not cap.isOpened():
-        if cap is not None:
-            try:
-                cap.release()
-            except Exception:
-                pass
-        cam_idx: Any = int(cam_src) if cam_src.strip().isdigit() else cam_src
-        cap = cv2.VideoCapture(cam_idx)
-        if cap.isOpened():
-            cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
-            cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
-        st.session_state[cam_key] = cap
+    cap = _create_cap(cam_src)
+    if not cap.isOpened():
+        _create_cap.clear(cam_src)
+        cap = _create_cap(cam_src)
     return cap if cap.isOpened() else None
 
 
@@ -607,5 +611,5 @@ with right_col:
     )
 
 # ── Auto-refresh ──────────────────────────────────────────────────────────────
-time.sleep(0.033)
+time.sleep(0.065)
 st.rerun()

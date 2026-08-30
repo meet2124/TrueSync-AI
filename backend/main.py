@@ -77,13 +77,10 @@ def get_engine() -> AbstractBiometricEngine:
     No other file requires modification.  See docs/phase2_integration.md.
     """
     if ENGINE_MODE == "production":
-        # Phase 2: import and instantiate the real engine here.
-        # e.g. from backend.core.production_engine import ProductionEngine
-        # return ProductionEngine()
-        raise NotImplementedError(
-            "Production engine not yet implemented. "
-            "See docs/phase2_integration.md."
-        )
+        from backend.core.production_engine import ProductionEngine
+        logger.info("Engine factory: instantiating ProductionEngine (ENGINE_MODE=%s)", ENGINE_MODE)
+        return ProductionEngine()
+
     logger.info("Engine factory: instantiating MockEngine (ENGINE_MODE=%s)", ENGINE_MODE)
     return MockEngine()
 
