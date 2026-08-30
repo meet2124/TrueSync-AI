@@ -116,15 +116,18 @@ section[data-testid="stSidebar"] {
 st.markdown(_CSS, unsafe_allow_html=True)
 
 # ── Session state ─────────────────────────────────────────────────────────────
+# ws_conn_state: one of CONNECTING | CONNECTED | DISCONNECTED | RECONNECTING
 def _init() -> None:
     defaults: dict[str, Any] = {
         "ws_connected": False,
+        "ws_conn_state": "CONNECTING",
         "ws_error": None,
         "latest_result": None,
         "waveform": deque([0.0] * _WAVEFORM_LEN, maxlen=_WAVEFORM_LEN),
-        "send_q": queue.Queue(maxsize=10),   # frames to send
-        "recv_q": queue.Queue(maxsize=10),   # results received
-        "ws_thread_started": False,
+        "send_q": queue.Queue(maxsize=10),
+        "recv_q": queue.Queue(maxsize=10),
+        "ws_thread": None,    # holds the Thread object for is_alive() check
+        "cap": None,          # persistent VideoCapture — opened once, not per rerun
         "cam_frame": None,
     }
     for k, v in defaults.items():
@@ -135,52 +138,105 @@ _init()
 
 
 # ── WebSocket background thread ───────────────────────────────────────────────
+_WS_RECONNECT_DELAYS = [1, 2, 4, 8, 15]   # seconds between reconnect attempts
+
+
 def _ws_thread(ws_url: str, send_q: queue.Queue, recv_q: queue.Queue) -> None:
     """
-    Runs in a daemon thread. Holds one persistent WebSocket connection open.
-    Sends frames from send_q; puts received BiometricResult JSON into recv_q.
-    """
-    try:
-        import websocket as _ws_lib
-        ws = _ws_lib.create_connection(ws_url, timeout=10)
-        recv_q.put({"_connected": True})
+    Persistent daemon thread with automatic reconnect.
 
-        # Spawn a sub-thread for blocking recv
-        def _recv_loop() -> None:
+    State signals sent via recv_q (never contains fake telemetry):
+      {"_conn_state": "CONNECTING"}    — attempting connection
+      {"_conn_state": "CONNECTED"}     — handshake succeeded
+      {"_conn_state": "DISCONNECTED"}  — lost connection, giving up
+      {"_conn_state": "RECONNECTING"}  — lost connection, will retry
+      {"_error": "<message>"}          — last error message
+    Real BiometricResult dicts are forwarded as-is.
+    """
+    import websocket as _ws_lib
+
+    attempt = 0
+    while True:
+        recv_q.put({"_conn_state": "CONNECTING" if attempt == 0 else "RECONNECTING"})
+        try:
+            ws = _ws_lib.create_connection(ws_url, timeout=10)
+        except Exception as exc:
+            recv_q.put({"_error": str(exc)})
+            delay = _WS_RECONNECT_DELAYS[min(attempt, len(_WS_RECONNECT_DELAYS) - 1)]
+            attempt += 1
+            time.sleep(delay)
+            continue
+
+        recv_q.put({"_conn_state": "CONNECTED"})
+        attempt = 0  # reset backoff on successful connect
+
+        # Sub-thread: blocking recv loop — exits on any socket error
+        def _recv_loop(ws=ws) -> None:
             while True:
                 try:
                     raw = ws.recv()
                     if raw:
-                        recv_q.put(json.loads(raw))
+                        try:
+                            recv_q.put(json.loads(raw))
+                        except json.JSONDecodeError:
+                            pass  # silently drop malformed frames
                 except Exception:
                     break
 
         recv_thread = threading.Thread(target=_recv_loop, daemon=True)
         recv_thread.start()
 
+        # Main send loop — exits when socket dies or shutdown sentinel received
         while True:
             try:
                 msg = send_q.get(timeout=0.05)
-                if msg is None:  # shutdown signal
-                    break
+                if msg is None:  # explicit shutdown sentinel
+                    try:
+                        ws.close()
+                    except Exception:
+                        pass
+                    recv_q.put({"_conn_state": "DISCONNECTED"})
+                    return  # exit thread permanently
                 ws.send(json.dumps(msg))
             except queue.Empty:
-                pass
+                # Check whether recv_loop died (socket gone)
+                if not recv_thread.is_alive():
+                    break
             except Exception as exc:
                 recv_q.put({"_error": str(exc)})
                 break
 
-        ws.close()
-    except Exception as exc:
-        recv_q.put({"_error": str(exc)})
+        try:
+            ws.close()
+        except Exception:
+            pass
+        recv_q.put({"_conn_state": "RECONNECTING"})
+        delay = _WS_RECONNECT_DELAYS[min(attempt, len(_WS_RECONNECT_DELAYS) - 1)]
+        attempt += 1
+        time.sleep(delay)
 
 
 # ── Camera capture helper ─────────────────────────────────────────────────────
-def _read_frame(cap: cv2.VideoCapture) -> Optional[np.ndarray]:
-    ok, frame = cap.read()
-    if not ok:
-        return None
-    return frame
+def _get_cap(cam_src: str) -> Optional[cv2.VideoCapture]:
+    """
+    Return the cached VideoCapture, creating it only if it does not exist or
+    the source has changed. Never opens a new device on every Streamlit rerun.
+    """
+    cam_key = f"_cap_src_{cam_src}"  # unique key per source
+    cap: Optional[cv2.VideoCapture] = st.session_state.get(cam_key)
+    if cap is None or not cap.isOpened():
+        if cap is not None:
+            try:
+                cap.release()
+            except Exception:
+                pass
+        cam_idx: Any = int(cam_src) if cam_src.strip().isdigit() else cam_src
+        cap = cv2.VideoCapture(cam_idx)
+        if cap.isOpened():
+            cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
+            cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+        st.session_state[cam_key] = cap
+    return cap if cap.isOpened() else None
 
 
 # ── Chart builders ────────────────────────────────────────────────────────────
@@ -289,64 +345,75 @@ st.markdown(
 )
 st.markdown("---")
 
-# ── Start WebSocket + Camera ──────────────────────────────────────────────────
+# ── Start WebSocket thread (once; survives reruns via is_alive check) ─────────
 send_q: queue.Queue = st.session_state["send_q"]
 recv_q: queue.Queue = st.session_state["recv_q"]
 
-if not st.session_state["ws_thread_started"]:
-    t = threading.Thread(
+_existing_thread: Optional[threading.Thread] = st.session_state.get("ws_thread")
+if _existing_thread is None or not _existing_thread.is_alive():
+    # No thread running — start one. The thread handles its own reconnect loop.
+    _t = threading.Thread(
         target=_ws_thread,
         args=(ws_url, send_q, recv_q),
         daemon=True,
+        name="truesync-ws",
     )
-    t.start()
-    st.session_state["ws_thread_started"] = True
+    _t.start()
+    st.session_state["ws_thread"] = _t
 
-# Drain recv_q for latest result
+# ── Drain recv_q — update connection state and latest result ──────────────────
 while not recv_q.empty():
-    msg = recv_q.get_nowait()
-    if "_connected" in msg:
-        st.session_state["ws_connected"] = True
-        st.session_state["ws_error"] = None
-    elif "_error" in msg:
-        st.session_state["ws_connected"] = False
-        st.session_state["ws_error"] = msg["_error"]
+    _msg = recv_q.get_nowait()
+    if "_conn_state" in _msg:
+        _state = _msg["_conn_state"]
+        st.session_state["ws_conn_state"] = _state
+        st.session_state["ws_connected"] = (_state == "CONNECTED")
+        if _state in ("CONNECTING", "RECONNECTING"):
+            # Clear stale results so disconnected state is obvious
+            st.session_state["latest_result"] = None
+    elif "_error" in _msg:
+        st.session_state["ws_error"] = _msg["_error"]
     else:
-        st.session_state["latest_result"] = msg
-        wf = msg.get("rppg_waveform", [])
+        # Real BiometricResult from backend
+        st.session_state["latest_result"] = _msg
+        wf = _msg.get("rppg_waveform", [])
         if wf:
             for v in wf[-5:]:
                 st.session_state["waveform"].append(float(v))
 
-# Capture one camera frame and queue it for sending
+# ── Camera: read from persistent VideoCapture (no open/release per rerun) ─────
 try:
-    cam_idx: Any = int(cam_src) if cam_src.strip().isdigit() else cam_src
-    cap = cv2.VideoCapture(cam_idx)
-    cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
-    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
-    ok, raw_frame = cap.read()
-    cap.release()
-
-    if ok and raw_frame is not None:
-        display_frame = cv2.cvtColor(raw_frame, cv2.COLOR_BGR2RGB)
-        st.session_state["cam_frame"] = display_frame
-        # Encode to JPEG and queue for backend
-        encode_frame = cv2.resize(raw_frame, (640, 480))
-        _, buf = cv2.imencode(".jpg", encode_frame, [cv2.IMWRITE_JPEG_QUALITY, 75])
-        b64 = base64.b64encode(buf.tobytes()).decode("utf-8")
-        msg_out = {"type": "video_frame", "timestamp": time.time(), "data": b64}
-        try:
-            send_q.put_nowait(msg_out)
-        except queue.Full:
-            pass
+    _cap = _get_cap(cam_src)
+    if _cap is not None:
+        ok, raw_frame = _cap.read()
+        if ok and raw_frame is not None:
+            display_frame = cv2.cvtColor(raw_frame, cv2.COLOR_BGR2RGB)
+            st.session_state["cam_frame"] = display_frame
+            # Encode and queue for backend only when connected
+            if st.session_state["ws_connected"]:
+                encode_frame = cv2.resize(raw_frame, (640, 480))
+                _, buf = cv2.imencode(".jpg", encode_frame, [cv2.IMWRITE_JPEG_QUALITY, 75])
+                b64 = base64.b64encode(buf.tobytes()).decode("utf-8")
+                _frame_msg = {"type": "video_frame", "timestamp": time.time(), "data": b64}
+                try:
+                    send_q.put_nowait(_frame_msg)
+                except queue.Full:
+                    pass
 except Exception:
     pass
 
-# ── Status banner ─────────────────────────────────────────────────────────────
-if not st.session_state["ws_connected"]:
-    err = st.session_state.get("ws_error") or "connecting…"
+# ── Connection state banner ────────────────────────────────────────────────────
+_conn_state: str = st.session_state.get("ws_conn_state", "CONNECTING")
+if _conn_state != "CONNECTED":
+    _err_detail = f" — {st.session_state['ws_error']}" if st.session_state.get("ws_error") else ""
+    _banner_icons = {
+        "CONNECTING":    ("📡", "Connecting to backend…"),
+        "RECONNECTING":  ("🔄", f"Backend disconnected. Reconnecting…{_err_detail}"),
+        "DISCONNECTED":  ("🔴", f"Backend unreachable.{_err_detail}"),
+    }
+    _icon, _detail = _banner_icons.get(_conn_state, ("📡", _conn_state))
     st.markdown(
-        f'<div class="ts-offline">📡 Backend: {err}</div>',
+        f'<div class="ts-offline">{_icon} {_detail}</div>',
         unsafe_allow_html=True,
     )
 
@@ -488,22 +555,20 @@ with right_col:
     )
 
     # Connection state card
-    if not st.session_state["ws_connected"]:
-        conn_color = "#ff6600"
-        conn_label = "🔴 DISCONNECTED"
-        conn_detail = st.session_state.get("ws_error") or "Connecting…"
-    elif flag == "calibrating":
-        conn_color = "#ffcc00"
-        conn_label = "🟡 CALIBRATING"
-        conn_detail = "Collecting biometric data…"
-    elif flag == "nominal":
-        conn_color = "#00ff88"
-        conn_label = "🟢 ANALYZING"
-        conn_detail = "Live biometric stream active"
-    else:
-        conn_color = "#ff9900"
-        conn_label = "🟠 LOW CONFIDENCE"
-        conn_detail = "Signals insufficient — check lighting & mic"
+    _cs = st.session_state.get("ws_conn_state", "CONNECTING")
+    if _cs == "CONNECTED":
+        if flag == "nominal":
+            conn_color, conn_label, conn_detail = "#00ff88", "🟢 ANALYZING", "Live biometric stream active"
+        elif flag == "calibrating":
+            conn_color, conn_label, conn_detail = "#ffcc00", "🟡 CONNECTED — CALIBRATING", "Collecting signal data…"
+        else:
+            conn_color, conn_label, conn_detail = "#ff9900", "🟠 CONNECTED — LOW CONFIDENCE", "Signals weak — check lighting & mic"
+    elif _cs == "CONNECTING":
+        conn_color, conn_label, conn_detail = "#5a9abf", "🔵 CONNECTING", "Opening WebSocket to backend…"
+    elif _cs == "RECONNECTING":
+        conn_color, conn_label, conn_detail = "#ff9900", "🟠 RECONNECTING", f"Lost connection — retrying… ({st.session_state.get('ws_error', '')})"
+    else:  # DISCONNECTED
+        conn_color, conn_label, conn_detail = "#ff4a4a", "🔴 DISCONNECTED", st.session_state.get("ws_error") or "Backend unreachable"
 
     st.markdown(
         f'<div style="background:#0d1520;border:1px solid {conn_color}33;border-radius:8px;'
