@@ -1,256 +1,516 @@
-// Elements
-const videoEl = document.getElementById('webcam');
-const overlayEl = document.getElementById('camera-overlay');
-const hiddenCanvas = document.getElementById('hidden-canvas');
-const ctx = hiddenCanvas.getContext('2d');
+/**
+ * frontend/static/js/app.js
+ * TrueSync AI — Verification Dashboard
+ *
+ * WebSocket protocol is UNCHANGED from the backend contract:
+ *   Inbound: { type:"video_frame", data:"<base64 JPEG>" }
+ *             { type:"audio_chunk", data:[float,...], sample_rate:16000 }
+ *   Outbound: BiometricFrame JSON (see backend/core/schemas.py)
+ *
+ * All displayed values come directly from backend messages.
+ * Nothing is fabricated or mocked in this JS.
+ */
 
-const connTitle = document.getElementById('conn-title');
-const connDetail = document.getElementById('conn-detail');
-const connCard = document.getElementById('conn-status-card');
-const sessionIdEl = document.getElementById('session-id');
-const camStatus = document.getElementById('cam-status');
-const micStatus = document.getElementById('mic-status');
+'use strict';
 
-const pillRppg = document.getElementById('pill-rppg');
-const pillAcoustic = document.getElementById('pill-acoustic');
-const pillSync = document.getElementById('pill-sync');
-const resultBox = document.getElementById('result-box');
+/* ─── Element references ──────────────────────────────────────────── */
+const videoEl          = document.getElementById('webcam');
+const hiddenCanvas     = document.getElementById('hidden-canvas');
+const ctx              = hiddenCanvas.getContext('2d');
+const cameraOverlay    = document.getElementById('camera-overlay');
+const overlayTextEl    = document.getElementById('overlay-text');
+const scanLine         = document.getElementById('scan-line');
+const faceGuide        = document.getElementById('face-guide');
 
-// State
-let ws = null;
-let mediaStream = null;
-let audioContext = null;
-let scriptProcessor = null;
-let sourceNode = null;
-let isConnected = false;
-let animationFrameId = null;
+const connBanner       = document.getElementById('conn-banner');
+const connDot          = document.getElementById('conn-dot');
+const connLabel        = document.getElementById('conn-label');
 
-// Config
-const TARGET_FPS = 15; // Limit browser CPU usage
-const FRAME_INTERVAL_MS = 1000 / TARGET_FPS;
-let lastFrameTime = 0;
+const engineBadge      = document.getElementById('engine-badge');
+const engineDot        = document.getElementById('engine-dot');
+const engineModeLabel  = document.getElementById('engine-mode-label');
+const sessionIdEl      = document.getElementById('session-id');
 
-// Initialize
-async function init() {
-    try {
-        updateConnStatus("CONNECTING", "Opening WebSocket to backend...", "#5a9abf");
-        
-        // 1. Setup WebSocket
-        const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-        const wsUrl = `${protocol}//${window.location.host}/ws/session`;
-        ws = new WebSocket(wsUrl);
-        
-        ws.onopen = () => {
-            isConnected = true;
-            updateConnStatus("CONNECTED", "Live biometric stream active", "#00ff88");
-            startMediaCapture();
-        };
-        
-        ws.onclose = () => {
-            isConnected = false;
-            updateConnStatus("DISCONNECTED", "Backend unreachable. Retrying...", "#ff4a4a");
-            stopMediaCapture();
-            setTimeout(init, 3000);
-        };
-        
-        ws.onerror = (err) => {
-            console.error("WebSocket error", err);
-        };
-        
-        ws.onmessage = (event) => {
-            try {
-                const data = JSON.parse(event.data);
-                handleBiometricFrame(data);
-            } catch (e) {
-                console.error("Failed to parse message", e);
-            }
-        };
-        
-    } catch (e) {
-        console.error("Init failed", e);
-        updateConnStatus("DISCONNECTED", e.message, "#ff4a4a");
-    }
+const chipCam          = document.getElementById('chip-cam');
+const camStatusText    = document.getElementById('cam-status-text');
+const chipMic          = document.getElementById('chip-mic');
+const micStatusText    = document.getElementById('mic-status-text');
+
+const bpmValueEl       = document.getElementById('bpm-value');
+const rppgCanvas       = document.getElementById('rppg-canvas');
+const waveformIdle     = document.getElementById('waveform-idle');
+const rppgCtx          = rppgCanvas.getContext('2d');
+
+const gaugeArc         = document.getElementById('gauge-arc');
+const trustScoreEl     = document.getElementById('trust-score');
+
+const sigRppg          = document.getElementById('sig-rppg');
+const scoreRppg        = document.getElementById('score-rppg');
+const barRppg          = document.getElementById('bar-rppg');
+
+const sigAcoustic      = document.getElementById('sig-acoustic');
+const scoreAcoustic    = document.getElementById('score-acoustic');
+const barAcoustic      = document.getElementById('bar-acoustic');
+
+const sigSync          = document.getElementById('sig-sync');
+const scoreSync        = document.getElementById('score-sync');
+const barSync          = document.getElementById('bar-sync');
+
+const decisionCard     = document.getElementById('decision-card');
+const decisionIcon     = document.getElementById('decision-icon');
+const decisionTitle    = document.getElementById('decision-title');
+const decisionDetail   = document.getElementById('decision-detail');
+
+/* ─── State ───────────────────────────────────────────────────────── */
+let ws               = null;
+let mediaStream      = null;
+let audioContext     = null;
+let scriptProcessor  = null;
+let sourceNode       = null;
+let isConnected      = false;
+let animFrameId      = null;
+let reconnectTimer   = null;
+let reconnectDelay   = 2000;   // ms — backs off on repeated failures
+const MAX_RECONNECT  = 16000;
+
+/* Video capture config */
+const TARGET_FPS       = 15;
+const FRAME_INTERVAL   = 1000 / TARGET_FPS;
+let lastFrameTime      = 0;
+
+/* rPPG waveform ring buffer */
+const WAVEFORM_POINTS  = 150;
+let waveformBuffer     = new Array(WAVEFORM_POINTS).fill(null);
+let waveformHasData    = false;
+
+/* Gauge arc geometry — arc length at 100% */
+const GAUGE_ARC_LEN    = 283;  // must match SVG stroke-dasharray
+
+/* ─── Connection banner helpers ───────────────────────────────────── */
+const CONNECTION_STATES = {
+    connecting:   { cls: 'state-connecting',   text: 'Connecting to verification engine…' },
+    connected:    { cls: 'state-connected',     text: 'Connected — live biometric stream active' },
+    processing:   { cls: 'state-processing',    text: 'Processing — receiving biometric data' },
+    disconnected: { cls: 'state-disconnected',  text: 'Disconnected — reconnecting…' },
+    error:        { cls: 'state-error',          text: 'Connection error' },
+};
+
+function setConnectionState(state, customText) {
+    const def = CONNECTION_STATES[state] || CONNECTION_STATES.connecting;
+    const allCls = Object.values(CONNECTION_STATES).map(d => d.cls);
+    connBanner.classList.remove(...allCls);
+    connBanner.classList.add(def.cls);
+    connLabel.textContent = customText || def.text;
 }
 
-// Media Capture
-async function startMediaCapture() {
-    try {
-        if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
-            throw new Error("Browser API unsupported or Insecure Context (needs HTTPS/localhost)");
-        }
+/* ─── WebSocket init ──────────────────────────────────────────────── */
+function init() {
+    if (ws && ws.readyState < WebSocket.CLOSING) return;
 
-        mediaStream = await navigator.mediaDevices.getUserMedia({ 
-            video: { width: 640, height: 480, frameRate: 30, facingMode: "user" },
-            audio: true
+    setConnectionState('connecting');
+
+    try {
+        const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+        ws = new WebSocket(`${proto}//${window.location.host}/ws/session`);
+    } catch (e) {
+        setConnectionState('error', `WebSocket creation failed: ${e.message}`);
+        scheduleReconnect();
+        return;
+    }
+
+    ws.onopen = () => {
+        isConnected   = true;
+        reconnectDelay = 2000;  // reset backoff
+        setConnectionState('connected');
+        startMediaCapture();
+    };
+
+    ws.onclose = (ev) => {
+        isConnected = false;
+        stopMediaCapture();
+        const reason = ev.reason ? ` (${ev.reason})` : '';
+        setConnectionState('disconnected', `Disconnected${reason} — reconnecting in ${reconnectDelay / 1000}s`);
+        scheduleReconnect();
+    };
+
+    ws.onerror = () => {
+        // onerror fires before onclose — just log; onclose handles reconnect
+        setConnectionState('error', 'WebSocket error — check backend is running');
+    };
+
+    ws.onmessage = (ev) => {
+        try {
+            const frame = JSON.parse(ev.data);
+            setConnectionState('processing');
+            handleBiometricFrame(frame);
+        } catch (e) {
+            console.warn('[TrueSync] Failed to parse backend message:', e);
+        }
+    };
+}
+
+function scheduleReconnect() {
+    clearTimeout(reconnectTimer);
+    reconnectTimer = setTimeout(() => {
+        reconnectDelay = Math.min(reconnectDelay * 1.5, MAX_RECONNECT);
+        init();
+    }, reconnectDelay);
+}
+
+/* ─── Media capture ───────────────────────────────────────────────── */
+async function startMediaCapture() {
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+        setCameraState('error', 'Camera API unavailable (needs HTTPS or localhost)');
+        setMicState('error', '—');
+        return;
+    }
+
+    try {
+        mediaStream = await navigator.mediaDevices.getUserMedia({
+            video: { width: 640, height: 480, frameRate: 30, facingMode: 'user' },
+            audio: true,
         });
-        
-        // Video
+
+        // Camera
         videoEl.srcObject = mediaStream;
-        videoEl.play();
-        overlayEl.classList.add("hidden");
-        camStatus.innerHTML = "<span style='color:#00ff88'>✅ Active</span>";
-        
+        await videoEl.play().catch(() => {}); // autoplay might need user gesture
+        cameraOverlay.classList.add('hidden');
+        scanLine.classList.add('active');
+        faceGuide.classList.add('visible');
+        setCameraState('active', 'CAM');
+
         // Audio
         setupAudioPipeline(mediaStream);
-        micStatus.innerHTML = "<span style='color:#00ff88'>✅ Active</span>";
-        
-        // Start transmit loops
-        hiddenCanvas.width = 640;
+        setMicState('active', 'MIC');
+
+        // Video transmit loop
+        hiddenCanvas.width  = 640;
         hiddenCanvas.height = 480;
-        animationFrameId = requestAnimationFrame(processVideoFrame);
+        animFrameId = requestAnimationFrame(videoLoop);
 
     } catch (err) {
-        console.error("Media error:", err);
-        overlayEl.classList.remove("hidden");
-        document.getElementById('overlay-text').innerText = "🚫 " + err.message;
-        camStatus.innerHTML = "<span style='color:#ff4a4a'>❌ Denied/Error</span>";
-        micStatus.innerHTML = "<span style='color:#ff4a4a'>❌ Denied/Error</span>";
+        console.error('[TrueSync] Media error:', err);
+        let msg = err.message || 'Unknown media error';
+        if (err.name === 'NotAllowedError')   msg = 'Permission denied — please allow camera & microphone';
+        if (err.name === 'NotFoundError')      msg = 'No camera or microphone found';
+        if (err.name === 'NotReadableError')   msg = 'Camera in use by another application';
+        overlayTextEl.textContent = msg;
+        cameraOverlay.classList.remove('hidden');
+        scanLine.classList.remove('active');
+        faceGuide.classList.remove('visible');
+        setCameraState('error', 'CAM');
+        setMicState('error', 'MIC');
     }
 }
 
 function stopMediaCapture() {
-    if (animationFrameId) cancelAnimationFrame(animationFrameId);
-    if (scriptProcessor) scriptProcessor.disconnect();
-    if (sourceNode) sourceNode.disconnect();
-    if (audioContext) audioContext.close();
-    
-    if (mediaStream) {
-        mediaStream.getTracks().forEach(track => track.stop());
-        mediaStream = null;
-    }
+    if (animFrameId) { cancelAnimationFrame(animFrameId); animFrameId = null; }
+    if (scriptProcessor) { try { scriptProcessor.disconnect(); } catch (_) {} scriptProcessor = null; }
+    if (sourceNode)      { try { sourceNode.disconnect(); }      catch (_) {} sourceNode = null;      }
+    if (audioContext)    { try { audioContext.close(); }          catch (_) {} audioContext = null;    }
+    if (mediaStream)     { mediaStream.getTracks().forEach(t => t.stop()); mediaStream = null; }
+    scanLine.classList.remove('active');
+    faceGuide.classList.remove('visible');
 }
 
-// Audio Pipeline (PCM extraction)
+function setCameraState(state, text) {
+    chipCam.className = 'media-chip';
+    if (state === 'active') chipCam.classList.add('chip-active');
+    if (state === 'error')  chipCam.classList.add('chip-error');
+    camStatusText.textContent = text;
+}
+
+function setMicState(state, text) {
+    chipMic.className = 'media-chip';
+    if (state === 'active') chipMic.classList.add('chip-active');
+    if (state === 'error')  chipMic.classList.add('chip-error');
+    micStatusText.textContent = text;
+}
+
+/* ─── Audio pipeline ─────────────────────────────────────────────── */
 function setupAudioPipeline(stream) {
-    audioContext = new (window.AudioContext || window.webkitAudioContext)();
-    sourceNode = audioContext.createMediaStreamSource(stream);
-    
-    // 2048 buffer size is a good balance between latency and overhead
+    audioContext    = new (window.AudioContext || window.webkitAudioContext)();
+    sourceNode      = audioContext.createMediaStreamSource(stream);
     scriptProcessor = audioContext.createScriptProcessor(2048, 1, 1);
-    
-    scriptProcessor.onaudioprocess = (audioProcessingEvent) => {
-        if (!isConnected || ws.readyState !== WebSocket.OPEN) return;
-        
-        const inputBuffer = audioProcessingEvent.inputBuffer;
-        const inputData = inputBuffer.getChannelData(0); // Float32Array
-        
-        // Convert to standard array for JSON serialization
-        const samples = Array.from(inputData);
-        
-        const msg = {
-            type: "audio_chunk",
-            timestamp: Date.now() / 1000.0,
+
+    scriptProcessor.onaudioprocess = (event) => {
+        if (!isConnected || !ws || ws.readyState !== WebSocket.OPEN) return;
+
+        const pcm     = event.inputBuffer.getChannelData(0); // Float32Array
+        const samples = Array.from(pcm);
+
+        ws.send(JSON.stringify({
+            type:        'audio_chunk',
+            timestamp:   Date.now() / 1000.0,
             sample_rate: audioContext.sampleRate,
-            data: samples
-        };
-        
-        ws.send(JSON.stringify(msg));
+            data:        samples,
+        }));
     };
-    
+
     sourceNode.connect(scriptProcessor);
     scriptProcessor.connect(audioContext.destination);
 }
 
-// Video Pipeline
-function processVideoFrame(timestamp) {
-    if (!isConnected || ws.readyState !== WebSocket.OPEN) return;
-    
-    if (timestamp - lastFrameTime >= FRAME_INTERVAL_MS) {
-        lastFrameTime = timestamp;
-        
+/* ─── Video transmit loop ────────────────────────────────────────── */
+function videoLoop(ts) {
+    if (!isConnected || !ws || ws.readyState !== WebSocket.OPEN) {
+        animFrameId = requestAnimationFrame(videoLoop);
+        return;
+    }
+
+    if (ts - lastFrameTime >= FRAME_INTERVAL) {
+        lastFrameTime = ts;
+
         if (videoEl.readyState === videoEl.HAVE_ENOUGH_DATA) {
-            ctx.drawImage(videoEl, 0, 0, hiddenCanvas.width, hiddenCanvas.height);
-            // Quality 0.6 to save bandwidth
-            const dataUrl = hiddenCanvas.toDataURL('image/jpeg', 0.6);
-            // Strip 'data:image/jpeg;base64,'
-            const base64Data = dataUrl.split(',')[1];
-            
-            const msg = {
-                type: "video_frame",
+            ctx.drawImage(videoEl, 0, 0, 640, 480);
+            const dataUrl  = hiddenCanvas.toDataURL('image/jpeg', 0.6);
+            const b64      = dataUrl.split(',')[1];
+
+            ws.send(JSON.stringify({
+                type:      'video_frame',
                 timestamp: Date.now() / 1000.0,
-                data: base64Data
-            };
-            ws.send(JSON.stringify(msg));
+                data:      b64,
+            }));
         }
     }
-    
-    animationFrameId = requestAnimationFrame(processVideoFrame);
+
+    animFrameId = requestAnimationFrame(videoLoop);
 }
 
-// UI Updates
-function updateConnStatus(state, detail, color) {
-    connTitle.innerText = state;
-    connTitle.style.color = color;
-    connDetail.innerText = detail;
-    connCard.style.borderColor = color + "44";
-}
-
+/* ─── BiometricFrame handler ─────────────────────────────────────── */
+/**
+ * Receives BiometricFrame fields:
+ *   session_id, engine_mode, bpm, rppg_waveform, rppg_liveness,
+ *   audio_trust, sync_score, overall_trust, active_rois, status_flag
+ *
+ * Sub-scores (rppg_liveness, audio_trust, sync_score) are [0..1].
+ * overall_trust is [0..100].
+ */
 function handleBiometricFrame(frame) {
+    // Session & engine info
     if (frame.session_id) {
-        sessionIdEl.innerText = frame.session_id.substring(0, 8);
+        sessionIdEl.textContent = frame.session_id.substring(0, 8).toUpperCase();
     }
-    
-    updatePill(pillRppg, "Liveness", frame.rppg_liveness);
-    updatePill(pillAcoustic, "Voice Authenticity", frame.audio_trust);
-    updatePill(pillSync, "Audio-Visual Sync", frame.sync_score);
-    
-    renderResultBox(frame.status_flag, frame.overall_trust);
+
+    const mode = frame.engine_mode || '';
+    engineModeLabel.textContent = mode.toUpperCase() || '—';
+    engineDot.className = 'badge-dot';
+    if (mode === 'production') engineDot.classList.add('dot-production');
+    else if (mode === 'mock')  engineDot.classList.add('dot-mock');
+
+    // BPM
+    updateBpm(frame.bpm);
+
+    // rPPG waveform
+    if (Array.isArray(frame.rppg_waveform) && frame.rppg_waveform.length > 0) {
+        updateWaveformBuffer(frame.rppg_waveform);
+    }
+    drawWaveform();
+
+    // Signal cards — sub-scores are [0..1] from backend
+    updateSignalCard(sigRppg, scoreRppg, barRppg, frame.rppg_liveness);
+    updateSignalCard(sigAcoustic, scoreAcoustic, barAcoustic, frame.audio_trust);
+    updateSignalCard(sigSync, scoreSync, barSync, frame.sync_score);
+
+    // Trust gauge — overall_trust is [0..100]
+    updateTrustGauge(frame.overall_trust);
+
+    // Verification decision
+    updateDecision(frame.status_flag, frame.overall_trust);
 }
 
-function updatePill(el, label, score) {
-    el.className = "signal-pill"; // reset
-    if (score === null || score === undefined) {
-        el.classList.add("signal-na");
-        el.innerHTML = `<strong>${label}</strong> &nbsp; ⟳ Calc...`;
+/* ─── BPM display ────────────────────────────────────────────────── */
+function updateBpm(bpm) {
+    if (bpm === null || bpm === undefined) {
+        bpmValueEl.textContent = '—';
+        bpmValueEl.style.color = '';
     } else {
-        // Sub-scores from backend are [0, 1]
-        const safeScore = Math.max(0, Math.min(1, score));
-        const pct = Math.round(safeScore * 100);
-        if (safeScore >= 0.70) {
-            el.classList.add("signal-pass");
-            el.innerHTML = `<strong>${label}</strong> &nbsp; ✓ ${pct}%`;
+        const v = Math.round(clamp(bpm, 0, 300));
+        bpmValueEl.textContent = v;
+        // Color-code by physiological plausibility
+        if (v >= 45 && v <= 120) {
+            bpmValueEl.style.color = 'var(--clr-green)';
+        } else if (v > 120 && v <= 160) {
+            bpmValueEl.style.color = 'var(--clr-yellow)';
         } else {
-            el.classList.add("signal-fail");
-            el.innerHTML = `<strong>${label}</strong> &nbsp; ✗ ${pct}%`;
+            bpmValueEl.style.color = 'var(--clr-red)';
         }
     }
 }
 
-function renderResultBox(status, trust) {
-    resultBox.classList.remove("hidden");
-    resultBox.className = "result-box";
-    
-    // overall_trust from backend is already [0, 100]. Do not multiply by 100.
-    const rawTrust = trust !== null ? trust : 0;
-    const safeTrust = Math.max(0, Math.min(100, rawTrust));
-    const scoreVal = safeTrust.toFixed(1);
-    
-    if (status === "nominal") {
-        resultBox.classList.add("result-pass");
-        resultBox.innerHTML = `
-            <div class="result-title" style="color:var(--green)">🟢 HUMAN / CONSISTENT SIGNALS</div>
-            <div class="score" style="color:var(--green)">${scoreVal}<span class="score-max"> / 100</span></div>
-            <div class="result-reason" style="color:var(--green)">Analysis confirms active liveness signals.</div>
-        `;
-    } else if (status === "calibrating") {
-        resultBox.classList.add("result-pass");
-        resultBox.style.background = "rgba(255, 204, 0, 0.05)";
-        resultBox.style.borderColor = "rgba(255, 204, 0, 0.2)";
-        // Show provisional score during calibration clearly marked as calculating
-        resultBox.innerHTML = `
-            <div class="result-title" style="color:var(--yellow)">🟡 CALIBRATING</div>
-            <div class="score" style="color:var(--yellow)">${scoreVal}<span class="score-max"> / 100 (Provisional)</span></div>
-            <div class="result-reason" style="color:var(--yellow)">Collecting biometric samples. Please hold still and speak.</div>
-        `;
-    } else {
-        resultBox.classList.add("result-fail");
-        resultBox.innerHTML = `
-            <div class="result-title" style="color:var(--red)">🔴 SUSPICIOUS ACTIVITY</div>
-            <div class="score" style="color:var(--red)">${scoreVal}<span class="score-max"> / 100</span></div>
-            <div class="result-reason" style="color:var(--red)">Signals indicate possible synthesis or spoofing.</div>
-        `;
+/* ─── rPPG waveform ──────────────────────────────────────────────── */
+function updateWaveformBuffer(samples) {
+    waveformHasData = true;
+    waveformIdle.classList.add('hidden');
+    // Append new samples and keep only the last WAVEFORM_POINTS
+    for (const s of samples) {
+        waveformBuffer.push(s);
+    }
+    waveformBuffer = waveformBuffer.slice(-WAVEFORM_POINTS);
+}
+
+function drawWaveform() {
+    // Resize canvas to actual display size
+    const rect = rppgCanvas.getBoundingClientRect();
+    rppgCanvas.width  = rect.width  || 400;
+    rppgCanvas.height = rect.height || 90;
+    const W = rppgCanvas.width;
+    const H = rppgCanvas.height;
+
+    rppgCtx.clearRect(0, 0, W, H);
+
+    if (!waveformHasData) return;
+
+    const data = waveformBuffer;
+    const validData = data.filter(v => v !== null && isFinite(v));
+    if (validData.length < 2) return;
+
+    // Compute min/max for normalization
+    const min = Math.min(...validData);
+    const max = Math.max(...validData);
+    const range = max - min || 1;
+
+    const pad  = 8;
+    const xStep = W / (WAVEFORM_POINTS - 1);
+
+    // Draw glow line (thicker, transparent)
+    rppgCtx.beginPath();
+    rppgCtx.strokeStyle = 'rgba(0, 229, 255, 0.18)';
+    rppgCtx.lineWidth = 5;
+    rppgCtx.lineJoin = 'round';
+    rppgCtx.lineCap  = 'round';
+    plotWave(data, min, range, W, H, pad, xStep);
+    rppgCtx.stroke();
+
+    // Draw sharp line
+    rppgCtx.beginPath();
+    rppgCtx.strokeStyle = 'rgba(0, 229, 255, 0.85)';
+    rppgCtx.lineWidth = 1.5;
+    rppgCtx.lineJoin = 'round';
+    rppgCtx.lineCap  = 'round';
+    plotWave(data, min, range, W, H, pad, xStep);
+    rppgCtx.stroke();
+
+    // Fill area under curve
+    rppgCtx.beginPath();
+    plotWave(data, min, range, W, H, pad, xStep);
+    rppgCtx.lineTo(W, H);
+    rppgCtx.lineTo(0, H);
+    rppgCtx.closePath();
+    const fillGrad = rppgCtx.createLinearGradient(0, 0, 0, H);
+    fillGrad.addColorStop(0, 'rgba(0,229,255,0.14)');
+    fillGrad.addColorStop(1, 'rgba(0,229,255,0)');
+    rppgCtx.fillStyle = fillGrad;
+    rppgCtx.fill();
+}
+
+function plotWave(data, min, range, W, H, pad, xStep) {
+    let started = false;
+    for (let i = 0; i < data.length; i++) {
+        const v = data[i];
+        if (v === null || !isFinite(v)) continue;
+        const x = i * xStep;
+        const y = H - pad - ((v - min) / range) * (H - pad * 2);
+        if (!started) { rppgCtx.moveTo(x, y); started = true; }
+        else          { rppgCtx.lineTo(x, y); }
     }
 }
 
-// Start
+/* ─── Signal card update ─────────────────────────────────────────── */
+/**
+ * score is [0..1] from backend.
+ * null/undefined means "not yet available".
+ */
+function updateSignalCard(cardEl, scoreEl, barEl, score) {
+    cardEl.classList.remove('sig-pass', 'sig-warn', 'sig-fail');
+
+    if (score === null || score === undefined) {
+        scoreEl.textContent = '—';
+        barEl.style.width   = '0%';
+        return;
+    }
+
+    const safe = clamp(score, 0, 1);
+    const pct  = Math.round(safe * 100);
+    scoreEl.textContent = `${pct}%`;
+    barEl.style.width   = `${pct}%`;
+
+    if (safe >= 0.70) {
+        cardEl.classList.add('sig-pass');
+    } else if (safe >= 0.45) {
+        cardEl.classList.add('sig-warn');
+    } else {
+        cardEl.classList.add('sig-fail');
+    }
+}
+
+/* ─── Trust gauge update ─────────────────────────────────────────── */
+/**
+ * trust is [0..100] from backend.
+ */
+function updateTrustGauge(trust) {
+    if (trust === null || trust === undefined) {
+        trustScoreEl.textContent    = '—';
+        gaugeArc.style.strokeDashoffset = GAUGE_ARC_LEN;
+        trustScoreEl.style.color   = '';
+        return;
+    }
+
+    const safe   = clamp(trust, 0, 100);
+    const offset = GAUGE_ARC_LEN - (safe / 100) * GAUGE_ARC_LEN;
+    gaugeArc.style.strokeDashoffset = offset;
+    trustScoreEl.textContent = safe.toFixed(1);
+
+    // Color the score number to match the gauge region
+    if (safe >= 75)      trustScoreEl.style.color = 'var(--clr-green)';
+    else if (safe >= 50) trustScoreEl.style.color = 'var(--clr-yellow)';
+    else                 trustScoreEl.style.color = 'var(--clr-red)';
+}
+
+/* ─── Verification decision card ─────────────────────────────────── */
+/**
+ * status_flag: "nominal" | "calibrating" | "low_confidence" | "spoof_suspected"
+ */
+const DECISION_STATES = {
+    nominal: {
+        cls:    'dec-nominal',
+        icon:   '🟢',
+        title:  'VERIFIED — HUMAN SIGNALS CONSISTENT',
+        detail: 'All biometric signals are consistent with a live human subject. Biological pulse, acoustic characteristics, and audio-visual synchronization are within expected ranges.',
+    },
+    calibrating: {
+        cls:    'dec-calibrating',
+        icon:   '🔵',
+        title:  'CALIBRATING',
+        detail: 'Collecting biometric samples. Please face the camera directly, keep still, and speak naturally for a few seconds.',
+    },
+    low_confidence: {
+        cls:    'dec-low-confidence',
+        icon:   '🟡',
+        title:  'LOW CONFIDENCE',
+        detail: 'Signal quality is insufficient for a high-confidence decision. Check lighting, camera position, and ensure the microphone is active.',
+    },
+    spoof_suspected: {
+        cls:    'dec-spoof',
+        icon:   '🔴',
+        title:  'SUSPICIOUS — SIGNALS INCONSISTENT',
+        detail: 'One or more biometric signals show anomalies that may indicate synthetic or replayed media. Verification denied.',
+    },
+};
+
+function updateDecision(statusFlag, trust) {
+    const state = DECISION_STATES[statusFlag] || DECISION_STATES.calibrating;
+
+    decisionCard.className = `decision-card ${state.cls}`;
+    decisionIcon.textContent  = state.icon;
+    decisionTitle.textContent = state.title;
+    decisionDetail.textContent = state.detail;
+}
+
+/* ─── Utility ────────────────────────────────────────────────────── */
+function clamp(v, lo, hi) {
+    return Math.max(lo, Math.min(hi, v));
+}
+
+/* ─── Boot ───────────────────────────────────────────────────────── */
 init();

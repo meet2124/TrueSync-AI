@@ -4,59 +4,248 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>TrueSync AI | Secure Live Verification</title>
+    <meta name="description" content="TrueSync AI — Multimodal real-time liveness and anti-deepfake verification. Combines biological, acoustic, and audio-visual signals into an explainable trust decision.">
     <link rel="stylesheet" href="/static/css/style.css">
-    <link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@400;700;900&family=JetBrains+Mono:wght@400;700&display=swap" rel="stylesheet">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@400;600;700;900&family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
 </head>
 <body>
-    <div class="container">
-        <header>
-            <h1 class="title">TrueSync AI</h1>
-            <p class="subtitle">Secure Live Verification</p>
+    <!-- Background ambient grid -->
+    <div class="bg-grid" aria-hidden="true"></div>
+
+    <div class="app-shell">
+
+        <!-- ══ HEADER ══════════════════════════════════════════════════ -->
+        <header class="app-header" role="banner">
+            <div class="header-brand">
+                <div class="brand-icon" aria-hidden="true">
+                    <svg width="32" height="32" viewBox="0 0 32 32" fill="none">
+                        <circle cx="16" cy="16" r="14" stroke="url(#brandGrad)" stroke-width="2"/>
+                        <path d="M9 16c2-4 4-6 7-6s5 2 7 6-4 6-7 6-7-2-7-6z" fill="url(#brandGrad)" opacity="0.7"/>
+                        <circle cx="16" cy="16" r="3" fill="url(#brandGrad)"/>
+                        <defs>
+                            <linearGradient id="brandGrad" x1="0" y1="0" x2="32" y2="32">
+                                <stop offset="0%" stop-color="#00f0ff"/>
+                                <stop offset="100%" stop-color="#a259ff"/>
+                            </linearGradient>
+                        </defs>
+                    </svg>
+                </div>
+                <div>
+                    <h1 class="brand-name">TrueSync AI</h1>
+                    <p class="brand-tagline">Multimodal Liveness Verification</p>
+                </div>
+            </div>
+
+            <div class="header-meta">
+                <div class="header-badge" id="engine-badge">
+                    <span class="badge-dot" id="engine-dot"></span>
+                    <span id="engine-mode-label">—</span>
+                </div>
+                <div class="header-session">
+                    <span class="session-label">SESSION</span>
+                    <span class="session-id mono" id="session-id">————————</span>
+                </div>
+            </div>
         </header>
 
-        <div class="main-content">
-            <div class="video-container">
-                <video id="webcam" autoplay playsinline muted></video>
-                <div class="camera-overlay" id="camera-overlay">
-                    <span id="overlay-text">📷 Camera unavailable — allow access</span>
-                </div>
-            </div>
-
-            <div class="status-panel">
-                <div class="status-card" id="conn-status-card">
-                    <div class="status-title" id="conn-title">🔵 CONNECTING</div>
-                    <div class="status-detail" id="conn-detail">Opening WebSocket to backend...</div>
-                </div>
-
-                <div class="status-card">
-                    <div class="status-title">ENGINE INFO</div>
-                    <div class="info-row">Mode: <span class="highlight">PRODUCTION V1</span></div>
-                    <div class="info-row">Session: <span class="highlight" id="session-id">—</span></div>
-                </div>
-
-                <div class="status-card">
-                    <div class="status-title">MEDIA STATUS</div>
-                    <div class="info-row">Camera: <span id="cam-status">⏳ Requesting...</span></div>
-                    <div class="info-row">Microphone: <span id="mic-status">⏳ Requesting...</span></div>
-                </div>
-            </div>
+        <!-- ══ CONNECTION BANNER ════════════════════════════════════════ -->
+        <div class="conn-banner" id="conn-banner" role="status" aria-live="polite">
+            <span class="conn-dot" id="conn-dot"></span>
+            <span id="conn-label">Initialising connection…</span>
         </div>
-        
-        <div class="results-panel">
-            <div class="pill-row">
-                <div class="signal-pill" id="pill-rppg">❤️ <strong>Liveness</strong> &nbsp; <span class="pill-val">N/A</span></div>
-                <div class="signal-pill" id="pill-acoustic">🎙️ <strong>Voice Authenticity</strong> &nbsp; <span class="pill-val">N/A</span></div>
-                <div class="signal-pill" id="pill-sync">👄 <strong>Audio-Visual Sync</strong> &nbsp; <span class="pill-val">N/A</span></div>
-            </div>
-            
-            <div id="result-box" class="result-box hidden">
-                <!-- Result content injected via JS -->
-            </div>
-        </div>
+
+        <!-- ══ MAIN GRID ════════════════════════════════════════════════ -->
+        <main class="main-grid" role="main">
+
+            <!-- ── LEFT: Camera + Waveform ─────────────────────────────── -->
+            <section class="col-left" aria-label="Camera feed and biometric waveform">
+
+                <!-- Camera -->
+                <div class="camera-card" id="camera-card">
+                    <div class="camera-header">
+                        <span class="card-label">LIVE FEED</span>
+                        <div class="media-indicators">
+                            <div class="media-chip" id="chip-cam" title="Camera status">
+                                <span class="chip-icon">⬤</span>
+                                <span class="chip-text" id="cam-status-text">CAM</span>
+                            </div>
+                            <div class="media-chip" id="chip-mic" title="Microphone status">
+                                <span class="chip-icon">⬤</span>
+                                <span class="chip-text" id="mic-status-text">MIC</span>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="camera-viewport">
+                        <video id="webcam" autoplay playsinline muted aria-label="Live camera preview"></video>
+                        <div class="camera-overlay" id="camera-overlay">
+                            <div class="overlay-content">
+                                <svg class="overlay-icon" width="48" height="48" viewBox="0 0 48 48" fill="none" aria-hidden="true">
+                                    <rect x="4" y="12" width="34" height="26" rx="4" stroke="#2a4a60" stroke-width="2"/>
+                                    <path d="M38 18l6-4v20l-6-4V18z" stroke="#2a4a60" stroke-width="2"/>
+                                    <circle cx="21" cy="25" r="6" stroke="#2a4a60" stroke-width="2"/>
+                                </svg>
+                                <p class="overlay-text" id="overlay-text">Requesting camera access…</p>
+                            </div>
+                        </div>
+                        <!-- Scanning animation overlay -->
+                        <div class="scan-line" id="scan-line" aria-hidden="true"></div>
+                        <!-- Face guide box -->
+                        <div class="face-guide" id="face-guide" aria-hidden="true"></div>
+                    </div>
+                </div>
+
+                <!-- rPPG Waveform -->
+                <div class="waveform-card">
+                    <div class="waveform-header">
+                        <span class="card-label">rPPG BIOLOGICAL SIGNAL</span>
+                        <div class="bpm-display">
+                            <span class="bpm-value mono" id="bpm-value">—</span>
+                            <span class="bpm-unit">BPM</span>
+                        </div>
+                    </div>
+                    <div class="waveform-viewport">
+                        <canvas id="rppg-canvas" aria-label="rPPG waveform chart"></canvas>
+                        <div class="waveform-idle" id="waveform-idle">
+                            <span>Awaiting signal…</span>
+                        </div>
+                    </div>
+                </div>
+
+            </section>
+
+            <!-- ── RIGHT: Signals + Trust + Decision ──────────────────── -->
+            <section class="col-right" aria-label="Biometric analysis results">
+
+                <!-- Trust Gauge -->
+                <div class="trust-card">
+                    <div class="card-label">OVERALL TRUST SCORE</div>
+                    <div class="trust-gauge-wrap">
+                        <svg class="trust-gauge" id="trust-gauge" viewBox="0 0 200 130" aria-label="Trust gauge">
+                            <!-- Background arc -->
+                            <path class="gauge-bg" d="M20,110 A90,90 0 0,1 180,110" fill="none" stroke="#0d1a28" stroke-width="18" stroke-linecap="round"/>
+                            <!-- Value arc -->
+                            <path class="gauge-arc" id="gauge-arc" d="M20,110 A90,90 0 0,1 180,110" fill="none" stroke="url(#gaugeGrad)" stroke-width="18" stroke-linecap="round" stroke-dasharray="283" stroke-dashoffset="283"/>
+                            <defs>
+                                <linearGradient id="gaugeGrad" x1="0%" y1="0%" x2="100%" y2="0%">
+                                    <stop offset="0%" stop-color="#ff4a4a"/>
+                                    <stop offset="50%" stop-color="#ffcc00"/>
+                                    <stop offset="100%" stop-color="#00ff88"/>
+                                </linearGradient>
+                            </defs>
+                        </svg>
+                        <div class="trust-value-overlay">
+                            <span class="trust-score mono" id="trust-score">—</span>
+                            <span class="trust-max">/ 100</span>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Signal breakdown cards -->
+                <div class="signals-grid">
+                    <div class="signal-card" id="sig-rppg">
+                        <div class="signal-icon" aria-hidden="true">
+                            <svg width="22" height="22" viewBox="0 0 22 22" fill="none">
+                                <path d="M1 11h4l2-7 3 14 3-10 2 5 2-2h4" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>
+                            </svg>
+                        </div>
+                        <div class="signal-body">
+                            <div class="signal-label">Biological Liveness</div>
+                            <div class="signal-sublabel">rPPG pulse analysis</div>
+                        </div>
+                        <div class="signal-value-wrap">
+                            <div class="signal-score mono" id="score-rppg">—</div>
+                            <div class="signal-bar-wrap">
+                                <div class="signal-bar" id="bar-rppg"></div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="signal-card" id="sig-acoustic">
+                        <div class="signal-icon" aria-hidden="true">
+                            <svg width="22" height="22" viewBox="0 0 22 22" fill="none">
+                                <path d="M11 2v18M7 5v12M3 8v6M15 5v12M19 8v6" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/>
+                            </svg>
+                        </div>
+                        <div class="signal-body">
+                            <div class="signal-label">Voice Authenticity</div>
+                            <div class="signal-sublabel">Acoustic anti-spoof</div>
+                        </div>
+                        <div class="signal-value-wrap">
+                            <div class="signal-score mono" id="score-acoustic">—</div>
+                            <div class="signal-bar-wrap">
+                                <div class="signal-bar" id="bar-acoustic"></div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="signal-card" id="sig-sync">
+                        <div class="signal-icon" aria-hidden="true">
+                            <svg width="22" height="22" viewBox="0 0 22 22" fill="none">
+                                <circle cx="11" cy="11" r="3" stroke="currentColor" stroke-width="1.8"/>
+                                <path d="M11 2v3M11 17v3M2 11h3M17 11h3" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/>
+                                <path d="M4.9 4.9l2.1 2.1M15 15l2.1 2.1M4.9 17.1l2.1-2.1M15 7l2.1-2.1" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/>
+                            </svg>
+                        </div>
+                        <div class="signal-body">
+                            <div class="signal-label">Audio-Visual Sync</div>
+                            <div class="signal-sublabel">Lip-sync coherence</div>
+                        </div>
+                        <div class="signal-value-wrap">
+                            <div class="signal-score mono" id="score-sync">—</div>
+                            <div class="signal-bar-wrap">
+                                <div class="signal-bar" id="bar-sync"></div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Fusion Weights Reference -->
+                <div class="weights-card">
+                    <div class="card-label">FUSION WEIGHTS</div>
+                    <div class="weights-row">
+                        <div class="weight-item">
+                            <div class="weight-pct">40%</div>
+                            <div class="weight-name">Liveness</div>
+                        </div>
+                        <div class="weight-sep">+</div>
+                        <div class="weight-item">
+                            <div class="weight-pct">35%</div>
+                            <div class="weight-name">Voice</div>
+                        </div>
+                        <div class="weight-sep">+</div>
+                        <div class="weight-item">
+                            <div class="weight-pct">25%</div>
+                            <div class="weight-name">Sync</div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Verification Decision -->
+                <div class="decision-card" id="decision-card">
+                    <div class="decision-icon" id="decision-icon" aria-hidden="true"></div>
+                    <div class="decision-text">
+                        <div class="decision-title" id="decision-title">Awaiting Analysis</div>
+                        <div class="decision-detail" id="decision-detail">Collecting biometric samples. Please face the camera and speak naturally.</div>
+                    </div>
+                </div>
+
+            </section>
+        </main>
+
+        <!-- ══ FOOTER ══════════════════════════════════════════════════ -->
+        <footer class="app-footer" role="contentinfo">
+            <span>TrueSync AI — INNO-CREW</span>
+            <span class="footer-sep">|</span>
+            <span>Multimodal Anti-Deepfake Verification</span>
+            <span class="footer-sep">|</span>
+            <span>Media is processed transiently and not stored.</span>
+        </footer>
     </div>
 
-    <!-- Hidden canvas for video frame extraction -->
-    <canvas id="hidden-canvas" style="display:none;"></canvas>
+    <!-- Hidden canvas for JPEG frame extraction -->
+    <canvas id="hidden-canvas" style="display:none;" aria-hidden="true"></canvas>
 
     <script src="/static/js/app.js"></script>
 </body>
