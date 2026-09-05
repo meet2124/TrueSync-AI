@@ -657,6 +657,50 @@ body {
 }
 .footer-sep { opacity: 0.3; }
 
+/* ── Camera device selector (Phase 2A) ──────────────────────────── */
+.device-select-wrap {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    padding: 0.45rem 1rem;
+    border-bottom: 1px solid var(--clr-border);
+    background: var(--clr-surface-2);
+}
+
+.device-select-icon {
+    flex-shrink: 0;
+    color: var(--clr-text-muted);
+    opacity: 0.7;
+}
+
+.device-select {
+    flex: 1;
+    min-width: 0;
+    background: var(--clr-surface-3);
+    color: var(--clr-text);
+    border: 1px solid var(--clr-border);
+    border-radius: var(--radius-sm);
+    padding: 0.28rem 0.55rem;
+    font-family: var(--font-body);
+    font-size: 0.72rem;
+    line-height: 1.4;
+    cursor: pointer;
+    outline: none;
+    appearance: auto;
+    transition: border-color var(--t-fast), background var(--t-fast);
+}
+
+.device-select:hover,
+.device-select:focus {
+    border-color: rgba(0, 229, 255, 0.35);
+    background: var(--clr-surface-2);
+}
+
+.device-select option {
+    background: var(--clr-surface-2);
+    color: var(--clr-text);
+}
+
 /* ── Responsive ──────────────────────────────────────────────────── */
 @media (max-width: 860px) {
     .main-grid {

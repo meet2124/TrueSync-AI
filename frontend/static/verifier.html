@@ -77,6 +77,15 @@
                             </div>
                         </div>
                     </div>
+                    <!-- Camera device selector — hidden until ≥2 cameras detected -->
+                    <div class="device-select-wrap hidden" id="camera-select-wrap" aria-label="Select camera">
+                        <svg class="device-select-icon" width="14" height="14" viewBox="0 0 14 14" fill="none" aria-hidden="true">
+                            <rect x="1" y="3" width="9" height="7" rx="1.5" stroke="currentColor" stroke-width="1.2"/>
+                            <path d="M10 5.5L13 4v6l-3-1.5V5.5z" stroke="currentColor" stroke-width="1.2" stroke-linejoin="round"/>
+                        </svg>
+                        <select id="camera-select" class="device-select" title="Select camera source"></select>
+                    </div>
+
                     <div class="camera-viewport">
                         <video id="webcam" autoplay playsinline muted aria-label="Live camera preview"></video>
                         <div class="camera-overlay" id="camera-overlay">
